@@ -665,84 +665,111 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === "/fetch" && req.method === "POST") {
-    let body = "";
-    for await (const chunk of req) {
-      body += chunk;
-    }
-
-    let targetUrl = null;
-    let cookies = "";
-
-    try {
-      const json = JSON.parse(body);
-      targetUrl = json.url;
-      cookies = json.cookies || "";
-    } catch (e) {
-      try {
-        new URL(body.trim());
-        targetUrl = body.trim();
-      } catch (e2) {}
-    }
-
-    if (!targetUrl) {
-      res.writeHead(400);
-      res.end(
-        JSON.stringify({ status: "error", message: "URL is required" }),
-      );
-      return;
-    }
-
-    await initBrowser();
-    await ensurePageReady();
-
-    console.log(
-      "[Server] Fetching through browser:",
-      targetUrl.substring(0, 80) + "...",
-    );
-
-    const fetchResult = await page.evaluate(async (url, cookies) => {
-      try {
-        const response = await fetch(url, {
-          credentials: "include",
-          headers: {
-            Accept: "application/json",
-            Cookie: cookies
-          },
-        });
-        const text = await response.text();
-        return {
-          status: response.status,
-          bodyLength: text.length,
-          data: text ? JSON.parse(text) : null,
-        };
-      } catch (e) {
-        return { error: e.message };
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
       }
-    }, targetUrl, cookies);
 
-    console.log(
-      "[Server] Fetch result:",
-      fetchResult.error || `${fetchResult.bodyLength} bytes`,
-    );
+      let targetUrl = null;
+      let userCookies = "";
 
-    if (fetchResult.error) {
-      res.writeHead(500);
-      res.end(
-        JSON.stringify({ status: "error", message: fetchResult.error }),
-      );
-      return;
-    }
+      try {
+        const json = JSON.parse(body);
+        targetUrl = json.url;
+        userCookies = json.cookies || "";
+      } catch (e) {
+        try {
+          new URL(body.trim());
+          targetUrl = body.trim();
+        } catch (e2) {}
+      }
 
-    res.writeHead(200);
-    res.end(
-      JSON.stringify({
+      if (!targetUrl) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ status: "error", message: "URL is required" }));
+        return;
+      }
+
+      await initBrowser();
+      await ensurePageReady();
+
+      // Cookie'leri browser'a set et
+      if (userCookies) {
+        const cookieList = userCookies.split(";").map(c => {
+          const [name, ...rest] = c.trim().split("=");
+          return {
+            name: name.trim(),
+            value: rest.join("=").trim(),
+            domain: ".tiktok.com",
+            path: "/",
+          };
+        }).filter(c => c.name);
+        await page.setCookie(...cookieList);
+        console.log(`[Server] Set ${cookieList.length} cookies`);
+      }
+
+      console.log("[Server] Fetching through browser:", targetUrl.substring(0, 80) + "...");
+
+      const fetchResult = await page.evaluate(async (url) => {
+        try {
+          const response = await fetch(url, {
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          });
+          const text = await response.text();
+          return {
+            status: response.status,
+            bodyLength: text.length,
+            data: text ? JSON.parse(text) : null,
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      }, targetUrl);
+
+      console.log("[Server] Fetch result:", fetchResult.error || `${fetchResult.bodyLength} bytes`);
+
+      if (fetchResult.error) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ status: "error", message: fetchResult.error }));
+        return;
+      }
+
+      let responseData = fetchResult.data;
+
+      if (fetchResult.data?.itemInfo?.itemStruct?.video?.bitrateInfo) {
+        const bitrateInfo = fetchResult.data.itemInfo.itemStruct.video.bitrateInfo;
+
+        const bestQuality = bitrateInfo.sort((a, b) => {
+          if (b.PlayAddr.Height !== a.PlayAddr.Height) {
+            return b.PlayAddr.Height - a.PlayAddr.Height;
+          }
+          const codecScore = (codec) => codec.includes("h265") ? 1 : 0;
+          if (codecScore(b.CodecType) !== codecScore(a.CodecType)) {
+            return codecScore(b.CodecType) - codecScore(a.CodecType);
+          }
+          return b.Bitrate - a.Bitrate;
+        })[0];
+
+        responseData = {
+          id: fetchResult.data.itemInfo.itemStruct.id,
+          desc: fetchResult.data.itemInfo.itemStruct.desc,
+          urls: bestQuality.PlayAddr.UrlList,
+          gearName: bestQuality.GearName,
+          codec: bestQuality.CodecType,
+          bitrate: bestQuality.Bitrate,
+          stats: fetchResult.data.itemInfo.itemStruct.stats,
+        };
+      }
+
+      res.writeHead(200);
+      res.end(JSON.stringify({
         status: "ok",
         httpStatus: fetchResult.status,
-        data: fetchResult.data,
-      }),
-    );
-    return;
-  }
+        data: responseData,
+      }));
+      return;
+    }
 
     // Generate signature (RECOMMENDED - scalable)
     if (url.pathname === "/signature" && req.method === "POST") {
