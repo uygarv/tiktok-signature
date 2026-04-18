@@ -664,81 +664,85 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // Fetch endpoint - makes request through browser (slower, but 100% reliable fallback)
-    // Use /signature + external requests for better scalability
     if (url.pathname === "/fetch" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) {
-        body += chunk;
-      }
+    let body = "";
+    for await (const chunk of req) {
+      body += chunk;
+    }
 
-      let targetUrl = null;
+    let targetUrl = null;
+    let cookies = "";
+
+    try {
+      const json = JSON.parse(body);
+      targetUrl = json.url;
+      cookies = json.cookies || "";
+    } catch (e) {
       try {
-        const json = JSON.parse(body);
-        targetUrl = json.url;
-      } catch (e) {
-        try {
-          new URL(body.trim());
-          targetUrl = body.trim();
-        } catch (e2) {}
-      }
+        new URL(body.trim());
+        targetUrl = body.trim();
+      } catch (e2) {}
+    }
 
-      if (!targetUrl) {
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ status: "error", message: "URL is required" }),
-        );
-        return;
-      }
-
-      await initBrowser();
-      await ensurePageReady();
-
-      console.log(
-        "[Server] Fetching through browser:",
-        targetUrl.substring(0, 80) + "...",
-      );
-
-      const fetchResult = await page.evaluate(async (url) => {
-        try {
-          const response = await fetch(url, {
-            credentials: "include",
-            headers: { Accept: "application/json" },
-          });
-          const text = await response.text();
-          return {
-            status: response.status,
-            bodyLength: text.length,
-            data: text ? JSON.parse(text) : null,
-          };
-        } catch (e) {
-          return { error: e.message };
-        }
-      }, targetUrl);
-
-      console.log(
-        "[Server] Fetch result:",
-        fetchResult.error || `${fetchResult.bodyLength} bytes`,
-      );
-
-      if (fetchResult.error) {
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({ status: "error", message: fetchResult.error }),
-        );
-        return;
-      }
-
-      res.writeHead(200);
+    if (!targetUrl) {
+      res.writeHead(400);
       res.end(
-        JSON.stringify({
-          status: "ok",
-          httpStatus: fetchResult.status,
-          data: fetchResult.data,
-        }),
+        JSON.stringify({ status: "error", message: "URL is required" }),
       );
       return;
     }
+
+    await initBrowser();
+    await ensurePageReady();
+
+    console.log(
+      "[Server] Fetching through browser:",
+      targetUrl.substring(0, 80) + "...",
+    );
+
+    const fetchResult = await page.evaluate(async (url, cookies) => {
+      try {
+        const response = await fetch(url, {
+          credentials: "include",
+          headers: {
+            Accept: "application/json",
+            Cookie: cookies
+          },
+        });
+        const text = await response.text();
+        return {
+          status: response.status,
+          bodyLength: text.length,
+          data: text ? JSON.parse(text) : null,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }, targetUrl, cookies);
+
+    console.log(
+      "[Server] Fetch result:",
+      fetchResult.error || `${fetchResult.bodyLength} bytes`,
+    );
+
+    if (fetchResult.error) {
+      res.writeHead(500);
+      res.end(
+        JSON.stringify({ status: "error", message: fetchResult.error }),
+      );
+      return;
+    }
+
+    res.writeHead(200);
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        httpStatus: fetchResult.status,
+        data: fetchResult.data,
+      }),
+    );
+    return;
+  }
 
     // Generate signature (RECOMMENDED - scalable)
     if (url.pathname === "/signature" && req.method === "POST") {
