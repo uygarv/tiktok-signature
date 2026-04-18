@@ -212,4 +212,7 @@ docker-compose.override.yml
 .dockerignore
 
 # Claude Code
-.claude/
+.claude/.chrome-profile/
+tiktok-signature/
+.chrome-profile/
+tiktok-signature/
